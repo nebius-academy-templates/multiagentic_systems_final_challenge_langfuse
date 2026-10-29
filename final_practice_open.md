@@ -188,7 +188,7 @@ Decide which MCP server gives your pipeline the external context it needs.
 }
 ```
 
-For a Docker image, put `docker` in `command` and the `docker run` arguments in `args`. For a remote server, use `"transport": "streamable_http"` with its `url`, and pass the token in `headers`, for example `{"Authorization": "Bearer <your token>"}`.
+For a Docker image, put `docker` in `command` and the `docker run` arguments in `args`, for example `["run", "-i", "--rm", "-e", "GITHUB_PERSONAL_ACCESS_TOKEN", "ghcr.io/github/github-mcp-server"]`. For a remote server, use `"transport": "streamable_http"` with its `url`, and pass the token in `headers`, for example `{"Authorization": "Bearer <your token>"}`.
 
 > **Think:** which tools does your MCP server expose? Which tool names will your agents call to search and which to fetch full content? (Use `client.get_tools()` in a scratch script to print them out.)
 > 

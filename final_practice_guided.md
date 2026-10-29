@@ -1,6 +1,6 @@
 ﻿# Final Practice — Guided
 
-In this task, you'll implement a graph-based QA agent that reads a user story from a Notion page via MCP, generates test cases, passes them through an automated quality gate, walks through a human-in-the-loop review, and publishes the final output back to Notion as a new child page.
+In this task, you'll implement a graph-based QA agent that reads a user story from a local file via MCP, generates test cases, passes them through an automated quality gate, walks through a human-in-the-loop review, and writes the final output to a local Markdown file.
 
 The pipeline is built around **three specialist agents**: a context agent that fetches the user story, a QA agent that generates test cases, and a quality agent that audits them and loops back if they fall short — plus a human review interrupt gate and a publish step.
 
@@ -20,13 +20,13 @@ You'll create every file from scratch: credentials, state, agent nodes, the huma
 
 ## 1. Set up your environment
 
-Once you log in to your GitHub account, the repository for this task will be added automatically.
+Once you log in to your GitHub account, the repository for this task is added automatically.
 
 1. Confirm that `multiagentic_systems_final_challenge` appears in your GitHub account.
 2. Clone the repo and open it in your editor.
-3. Make sure you have Python 3.11+ and Node.js installed.
+3. Make sure you have Python 3.11+ and Node.js 24+ installed.
 
-Install dependencies:
+Create `requirements.txt` in the project root with the content below, then install the dependencies:
 
 ```
 # with uv (recommended)
@@ -40,16 +40,17 @@ pip install -r requirements.txt
 
 ```
 langchain>=0.3
-langchain-anthropic>=0.3
-langchain-core>=0.3
+langchain-anthropic>=1.7
+langchain-core>=1
 langchain-mcp-adapters>=0.1
 langgraph>=0.2
 python-dotenv>=1.0
+langfuse>=4.7
 ```
 
 ### Repository layout
 
-Your task is to create all files listed below. 
+Your task is to create all files listed below, `mcp_config.json` and `requirements.txt` included.
 
 ```
 agent-qa-langgraph/
@@ -57,8 +58,8 @@ agent-qa-langgraph/
 ├── nodes.py            ← TODO: context_agent, qa_agent, quality_agent, human_review_node, publish_node (Tasks 4–5)
 ├── graph.py            ← TODO: wire the StateGraph (Task 6)
 ├── main.py             ← TODO: interrupt / resume entry point (Task 7)
-├── mcp_config.json     ← TODO
-└── requirements.txt    ← TODO
+├── mcp_config.json     ← the filesystem MCP server (Task 2)
+└── requirements.txt    ← the dependencies (Task 1)
 ```
 
 ### Key concepts
@@ -67,7 +68,7 @@ agent-qa-langgraph/
 
 **Human-in-the-loop (HITL)**: A node that calls `interrupt()` to pause graph execution, collects a human decision, then routes the graph forward (approved) or loops it back (needs changes).
 
-**MCP (Model Context Protocol)**: A standard for connecting LLMs to external context sources. You'll use `@notionhq/notion-mcp-server` via Node.js to give Claude access to Notion pages without writing custom API wrappers.
+**MCP (Model Context Protocol)**: A standard for connecting LLMs to external context sources. You'll use `@modelcontextprotocol/server-filesystem` via Node.js to give the agents access to local files without writing custom file wrappers.
 
 ---
 
@@ -78,35 +79,32 @@ agent-qa-langgraph/
 Create a `.env` file in the project root:
 
 ```
-NOTION_API_KEY=ntn_your_key_here
 ANTHROPIC_API_KEY=sk-ant-your_key_here
-LANGCHAIN_API_KEY=lsv2_your_key_here
-LANGCHAIN_TRACING_V2=true
-LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
-LANGCHAIN_PROJECT=qa-langgraph-agent
+ANTHROPIC_OPEN_TELEMETRY=false
+LANGFUSE_PUBLIC_KEY=pk-lf-your_key_here
+LANGFUSE_SECRET_KEY=sk-lf-your_key_here
+LANGFUSE_BASE_URL=https://cloud.langfuse.com
 ```
 
 **Where to get each key:**
 
 | Key | Source |
 | --- | --- |
-| `NOTION_API_KEY` | Notion → Settings → Connections → Develop or manage integrations |
 | `ANTHROPIC_API_KEY` | [console.anthropic.com](http://console.anthropic.com/) → API keys |
-| `LANGCHAIN_API_KEY` | [smith.langchain.com](http://smith.langchain.com/) → Settings → API keys |
+| `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` | [cloud.langfuse.com](https://cloud.langfuse.com/) → create a project named `qa-langgraph-agent` → Settings → API Keys |
+
+Keep `ANTHROPIC_OPEN_TELEMETRY=false`: the Langfuse handler already records every Claude call, and without this line the Anthropic SDK adds a second copy of each call to the trace.
 
 ### 2.2. Configure `mcp_config.json`
 
-Replace `ntn_your_key_here` with your real Notion key:
+Point the filesystem MCP server at the project root:
 
 ```json
 {
-  "notion": {
+  "filesystem": {
     "transport": "stdio",
     "command": "npx",
-    "args": ["-y", "@notionhq/notion-mcp-server"],
-    "env": {
-      "OPENAPI_MCP_HEADERS": "{\\"Authorization\\": \\"Bearer ntn_your_key_here\\", \\"Notion-Version\\": \\"2022-06-28\\"}"
-    }
+    "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
   }
 }
 ```
@@ -132,22 +130,22 @@ Define a `TypedDict` called `QAState`:
 
 | **Field** | **Type** | **Purpose** |
 | --- | --- | --- |
-| `page_id` | `str` | Notion page ID passed at startup |
-| `user_story` | `str` | Raw text of the user story fetched from Notion |
+| `file_path` | `str` | Path of the user story file passed at startup |
+| `user_story` | `str` | Raw text of the user story read from the file |
 | `draft_test_cases` | `str` | Test cases generated by the QA agent |
 | `reviewed_test_cases` | `str` | Polished test cases produced by the quality agent when it passes |
 | `quality_passed` | `bool` | `True` when the quality agent is satisfied with the draft |
-| `quality_feedback` | `str` | Issues found by the quality agent; `""` when quality passes |
+| `quality_feedback` | `str` | Issues found by the quality agent, or `""` when quality passes |
 | `human_approved` | `bool` | `True` once the human reviewer accepts the test cases |
-| `human_feedback` | `str` | Free-text feedback from the human; `""` when approved |
-| `published` | `bool` | `True` after the test cases are written to Notion |
-| `retry_count` | `int` | Loop counter incremented by the quality agent; caps at 3 |
+| `human_feedback` | `str` | Free-text feedback from the human, or `""` when approved |
+| `published` | `bool` | `True` after the test cases are written to `output_test_cases.md` |
+| `retry_count` | `int` | Loop counter incremented by the quality agent, capped at 3 |
 
 ```python
 from typing import TypedDict
 
 class QAState(TypedDict):
-    page_id: str
+    file_path: str
     user_story: str
     draft_test_cases: str
     reviewed_test_cases: str
@@ -163,19 +161,22 @@ class QAState(TypedDict):
 
 ## 4. Implement the three agent nodes in `nodes.py`
 
-Create `nodes.py`. All agents use `ChatAnthropic(model="claude-sonnet-4-5")`. The context agent and publish node also use the Notion MCP tools from `config["configurable"]["notion_tools"]`.
+Create `nodes.py`. All agents use `ChatAnthropic(model="claude-sonnet-5-5")`. The context agent and publish node also use the filesystem MCP tools from `config["configurable"]["fs_tools"]`. MCP tools run only asynchronously, so these two sync nodes call them with `asyncio.run(tool.ainvoke(...))`. Both nodes take `config: RunnableConfig` so LangGraph passes the config in.
 
 Start with shared imports and a helper:
 
 ```python
+import asyncio
+
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from state import QAState
 
-_llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0)
+_llm = ChatAnthropic(model="claude-sonnet-5-5", max_tokens=16000, streaming=True)
 
 def _call(system: str, user: str) -> str:
-    return _llm.invoke([SystemMessage(content=system), HumanMessage(content=user)]).content
+    return _llm.invoke([SystemMessage(content=system), HumanMessage(content=user)]).text
 ```
 
 ### 4.1. `context_agent_node` — **Agent 1: Read User Story**
@@ -186,17 +187,17 @@ This agent is responsible for reading the user story from a local file. It makes
 
 Using the `fs_tools` from `config["configurable"]`:
 
-1. Find the tool whose name contains `"read_file"` — this is the file-read tool.
-2. Call it with `{"path": state["file_path"]}` to get the file content.
-3. Extract the plain text from the response and store it in `user_story`.
+1. Find the tool whose name contains `"read_text_file"`. This is the file-read tool.
+2. Call it with `asyncio.run(tool.ainvoke({"path": state["file_path"]}))` to get the file content.
+3. Extract the plain text from the response (a list of content blocks, each with a `text` key) and store it in `user_story`.
 
 Return `{"user_story": ...}`.
 
 ```python
-def context_agent_node(state: QAState, config: dict) -> dict:
+def context_agent_node(state: QAState, config: RunnableConfig) -> dict:
     """Agent 1 — owns: user_story"""
     fs_tools = config["configurable"]["fs_tools"]
-    # TODO: find the read_file tool
+    # TODO: find the read_text_file tool
     # TODO: call it with state["file_path"]
     # TODO: extract text content and return {"user_story": ...}
 ```
@@ -268,7 +269,7 @@ User message: the `draft_test_cases` string.
 Parse the response:
 
 - Starts with `"PASSED"` → set `quality_passed = True`, `quality_feedback = ""`, produce `reviewed_test_cases = draft_test_cases` (the draft is accepted as-is).
-- Starts with `"FAILED"` → set `quality_passed = False`, `quality_feedback = <the issues text>`, leave `reviewed_test_cases` unchanged.
+- Starts with `"FAILED"` → set `quality_passed = False`, `quality_feedback = <the issues text>`, leave `reviewed_test_cases` unchanged, or set it to `draft_test_cases` if it is still empty.
 
 Return `{"quality_passed": ..., "quality_feedback": ..., "reviewed_test_cases": ..., "retry_count": state["retry_count"] + 1}`.
 
@@ -317,11 +318,11 @@ Runs after approval and writes the test cases to a local output file.
 Using the `fs_tools` from `config["configurable"]`:
 
 1. Find the tool whose name contains `"write_file"` — this writes to a file.
-2. Call it with `{"path": "output_test_cases.md", "content": state["reviewed_test_cases"]}` to save the test cases.
+2. Call it with `asyncio.run(tool.ainvoke({"path": "output_test_cases.md", "content": state["reviewed_test_cases"]}))` to save the test cases.
 3. Return `{"published": True}`.
 
 ```python
-def publish_node(state: QAState, config: dict) -> dict:
+def publish_node(state: QAState, config: RunnableConfig) -> dict:
     """Writes the approved test cases to a local output file."""
     fs_tools = config["configurable"]["fs_tools"]
     # TODO: find the write_file tool
@@ -330,7 +331,6 @@ def publish_node(state: QAState, config: dict) -> dict:
 ```
 
 > **Tip:** Print `[t.name for t in fs_tools]` at the start of a run to see the exact tool names your MCP server exposes.
-> 
 
 ---
 
@@ -406,36 +406,51 @@ Create `main.py`. It should:
 3. Load the filesystem MCP tools from `mcp_config.json` using `langchain_mcp_adapters`.
 4. Build the compiled graph.
 5. Create a unique `thread_id` per run.
-6. Stream the graph with the initial state, passing `fs_tools` in `config["configurable"]`.
-7. Catch `GraphInterrupt`, prompt the engineer with `input()`, and resume with `Command(resume=response)`.
+6. Stream the graph with the initial state, passing `fs_tools` in `config["configurable"]` and a Langfuse `CallbackHandler` in `config["callbacks"]`.
+7. When the stream yields an `__interrupt__` update, prompt the engineer with `input()` and resume with `Command(resume=response)`.
 8. Repeat the interrupt/resume loop until the graph reaches `END`.
 9. Print the final `published` flag.
 
 ```python
+import asyncio
+import json
 import sys
 import uuid
 from dotenv import load_dotenv
 load_dotenv()
 
 from langgraph.types import Command
-from langgraph.errors import GraphInterrupt
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler
 
 from graph import build_graph
 
+
 def load_fs_tools() -> list:
-    import json, asyncio
     with open("mcp_config.json") as f:
         cfg = json.load(f)
-    async def _load():
-        async with MultiServerMCPClient(cfg) as client:
-            return client.get_tools()
-    return asyncio.run(_load())
+    client = MultiServerMCPClient(cfg)
+    return asyncio.run(client.get_tools())
+
+
+def stream_until_pause(graph, payload, thread) -> str | None:
+    """Stream the graph until it ends or pauses. Return the interrupt prompt, or None at the end."""
+    for step in graph.stream(payload, config=thread, stream_mode="updates"):
+        node_name, updates = next(iter(step.items()))
+        if node_name == "__interrupt__":
+            return updates[0].value
+        print(f"  ✓ {node_name} wrote: {list(updates.keys())}")
+    return None
+
 
 def run(file_path: str) -> None:
     fs_tools = load_fs_tools()
     graph = build_graph()
-    thread = {"configurable": {"thread_id": str(uuid.uuid4()), "fs_tools": fs_tools}}
+    thread = {
+        "configurable": {"thread_id": str(uuid.uuid4()), "fs_tools": fs_tools},
+        "callbacks": [CallbackHandler()],
+    }
 
     initial = {
         "file_path": file_path,
@@ -452,23 +467,15 @@ def run(file_path: str) -> None:
 
     print(f"\n{'='*60}\nProcessing file: {file_path}\n{'='*60}")
 
-    try:
-        for step in graph.stream(initial, config=thread, stream_mode="updates"):
-            node_name, updates = next(iter(step.items()))
-            print(f"  ✓ {node_name} wrote: {list(updates.keys())}")
-    except GraphInterrupt as exc:
-        while True:
-            response = input(f"\n[REVIEW] {exc.args[0]}\n> ").strip()
-            try:
-                for step in graph.stream(Command(resume=response), config=thread, stream_mode="updates"):
-                    node_name, updates = next(iter(step.items()))
-                    print(f"  ✓ {node_name} wrote: {list(updates.keys())}")
-                break
-            except GraphInterrupt as next_exc:
-                exc = next_exc
+    prompt = stream_until_pause(graph, initial, thread)
+    while prompt is not None:
+        response = input(f"\n[REVIEW] {prompt}\n> ").strip()
+        prompt = stream_until_pause(graph, Command(resume=response), thread)
 
     final = graph.get_state(thread).values
     print(f"\n  published = {final.get('published')}")
+    get_client().flush()
+
 
 if __name__ == "__main__":
     file_path = sys.argv[1] if len(sys.argv) > 1 else ""
@@ -501,14 +508,18 @@ Processing file: user_story.txt
 
 [REVIEW] Approve these test cases? Type 'approve' or describe changes:
 > TC-002 is missing a step for invalid credentials — please add it
-
+### TC-001: Happy path login
+...
+  ✓ human_review wrote: ['human_approved', 'human_feedback']
   ✓ qa_agent wrote: ['draft_test_cases']
   ✓ quality_agent wrote: ['quality_passed', 'quality_feedback', 'reviewed_test_cases', 'retry_count']
 ...
 
 [REVIEW] Approve these test cases? Type 'approve' or describe changes:
 > approve
-
+### TC-001: Happy path login
+...
+  ✓ human_review wrote: ['human_approved', 'human_feedback']
   ✓ publish wrote: ['published']
 
   published = True
@@ -521,7 +532,7 @@ After a successful run, the approved test cases are saved to `output_test_cases
 - If filesystem MCP tools fail to load, confirm Node.js is installed: `node --version`.
 - The MCP server is scoped to `.` (the project root). Any file you pass must be inside the project directory or a subdirectory.
 - Print `[t.name for t in fs_tools]` in `context_agent_node` to see the exact tool names the MCP server exposes.
-- LangSmith tracing is enabled automatically via the `LANGCHAIN_*` env variables. Open `smith.langchain.com` after a run to see every node and LLM call.
+- Langfuse traces every run through the `CallbackHandler` in `main.py`. Open [cloud.langfuse.com](https://cloud.langfuse.com/), then **Tracing**, after a run to see every node and LLM call. Each `stream()` call is a trace of its own, so a run where you ask for one change and then approve shows as three traces.
 - `MemorySaver` keeps state in memory only. Each run gets a fresh `thread_id`, so runs are independent.
 - The `retry_count >= 3` safety exit in `quality_router` prevents the quality loop from running forever — the human will see the best draft produced so far.
 - Both `quality_feedback` and `human_feedback` are included in the QA Agent's next prompt when non-empty, so Claude explicitly addresses every raised issue.
@@ -530,21 +541,21 @@ After a successful run, the approved test cases are saved to `output_test_cases
 
 ## Submit your task
 
+Before submitting, review the checklist.
+
 ### ✅ Submission checklist
-
-
 
 - [ ]  `mcp_config.json` uses the filesystem MCP server pointing to `.`
 - [ ]  `user_story.txt` (or equivalent input file) exists in the project root
 - [ ]  `state.py` — `QAState` TypedDict with all 10 fields
 - [ ]  `nodes.py` — `context_agent_node` reads the user story from a local file via MCP
-- [ ]  `nodes.py` — `qa_agent_node` generates `draft_test_cases`; incorporates `quality_feedback` and `human_feedback` when present
+- [ ]  `nodes.py` — `qa_agent_node` generates `draft_test_cases` and incorporates `quality_feedback` and `human_feedback` when present
 - [ ]  `nodes.py` — `quality_agent_node` audits `draft_test_cases`, returns `quality_passed`, `quality_feedback`, `reviewed_test_cases`, increments `retry_count`
 - [ ]  `nodes.py` — `human_review_node` calls `interrupt()`, returns `human_approved` and `human_feedback`
 - [ ]  `nodes.py` — `publish_node` writes the approved test cases to `output_test_cases.md` via MCP
 - [ ]  `graph.py` — `build_graph` registers all five nodes with correct edges
-- [ ]  `graph.py` — `quality_router`: quality_passed or retry_count >= 3 → `human_review`; else → `qa_agent`
-- [ ]  `graph.py` — `review_router`: approved → `publish`; else → `qa_agent`
+- [ ]  `graph.py` — `quality_router`: quality_passed or retry_count >= 3 → `human_review`, else → `qa_agent`
+- [ ]  `graph.py` — `review_router`: approved → `publish`, else → `qa_agent`
 - [ ]  `graph.py` — compiled with `MemorySaver` checkpointer
 - [ ]  `main.py` — filesystem tools loaded from MCP config and passed via `configurable`
 - [ ]  `main.py` — interrupt / resume loop implemented

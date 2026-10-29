@@ -26,7 +26,7 @@ Pick one of the example domains below or propose your own.
 | **Content pipeline** | Fetches a GitHub issue, searches Notion for related docs, drafts a blog post, receives human approval, publishes as a Notion page |
 | **Incident responder** | Pulls an on-call alert, searches a runbook MCP server, drafts a post-mortem, receives human confirmation of severity, posts to Slack |
 | **Onboarding generator** | Reads a new-hire Jira ticket, fetches team docs via Notion MCP, drafts a personalized onboarding plan, receives human feedback, saves to Notion |
-| **Meeting summariser** | Reads a transcript file, queries a Confluence MCP for project context, writes action items, receives human edits, sends to email or Slack |
+| **Meeting summarizer** | Reads a transcript file, queries a Confluence MCP for project context, writes action items, receives human edits, sends to email or Slack |
 | **Your own idea** | Anything that has a multi-step information-gathering phase, a generation phase, and a human gate |
 
 > **Think before you continue.**
@@ -104,24 +104,25 @@ Once you have your design:
 
 1. Create a new folder for your project.
 2. Copy `requirements.txt` as a starting point and add any extra packages your domain needs.
-3. Create a `.env` file with the API keys your pipeline will use.
+3. Create a `.env` file with the API keys your pipeline will use, including `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` (from your Langfuse project's **Settings** → **API Keys**) and `LANGFUSE_BASE_URL=https://cloud.langfuse.com` for tracing, and `ANTHROPIC_OPEN_TELEMETRY=false` so each Claude call shows once in the trace.
 
-Minimum `requirements.txt`:
+Minimum `requirements.txt` (Python 3.11 or newer):
 
 ```
 langchain>=0.3
-langchain-anthropic>=0.3
-langchain-core>=0.3
+langchain-anthropic>=1.7
+langchain-core>=1
 langchain-mcp-adapters>=0.1
 langgraph>=0.2
 python-dotenv>=1.0
 httpx>=0.27
+langfuse>=4.7
 ```
 
 1. Confirm Node.js is available for MCP servers that use `npx`:
 
 ```bash
-node --version   # should print v18 or higher
+node --version   # should print v24 or higher
 ```
 
 ---
@@ -167,10 +168,7 @@ Decide which MCP server gives your pipeline the external context it needs.
 | Server | npm package | Use case |
 | --- | --- | --- |
 | Notion | `@notionhq/notion-mcp-server` | Docs, wikis, project pages |
-| GitHub | `@modelcontextprotocol/server-github` | Issues, PRs, file contents |
 | Filesystem | `@modelcontextprotocol/server-filesystem` | Local files, runbooks |
-| Slack | `@modelcontextprotocol/server-slack` | Channel history, threads |
-| Brave Search | `@modelcontextprotocol/server-brave-search` | Web search |
 
 ### 5.2 Create `mcp_config.json`
 
@@ -197,14 +195,17 @@ Decide which MCP server gives your pipeline the external context it needs.
 ### Shared setup
 
 ```python
+import asyncio
+
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.runnables import RunnableConfig
 from state import YourState
 
-_llm = ChatAnthropic(model="claude-sonnet-4-5", temperature=0)
+_llm = ChatAnthropic(model="claude-sonnet-5-5", max_tokens=16000, streaming=True)
 
 def _call(system: str, user: str) -> str:
-    return _llm.invoke([SystemMessage(content=system), HumanMessage(content=user)]).content
+    return _llm.invoke([SystemMessage(content=system), HumanMessage(content=user)]).text
 ```
 
 ### For each agent node
@@ -212,7 +213,7 @@ def _call(system: str, user: str) -> str:
 Follow this pattern:
 
 ```python
-def your_agent_node(state: YourState, config: dict) -> dict:
+def your_agent_node(state: YourState, config: RunnableConfig) -> dict:
     """One-sentence description of this agent's job."""
     # 1. Read the fields this agent needs from `state`
     # 2. Make LLM / tool calls
@@ -224,7 +225,8 @@ def your_agent_node(state: YourState, config: dict) -> dict:
 > 
 > - An agent node must return **only** the state fields it owns (see your decomposition notes).
 > - Never read from a field your agent does not own without a clear reason.
-> - If your agent calls MCP tools, receive `notion_tools` (or equivalent) from `config["configurable"]`.
+> - If your agent calls MCP tools, receive `notion_tools` (or equivalent) from `config["configurable"]`, and type the parameter as `config: RunnableConfig` so LangGraph passes it in.
+> - MCP tools run only asynchronously. From a sync node, call them with `asyncio.run(tool.ainvoke({...}))`.
 
 ### MCP tool call pattern
 
@@ -233,11 +235,11 @@ notion_tools = config["configurable"]["notion_tools"]
 
 # find the right tool by name
 search_tool = next(t for t in notion_tools if "search" in t.name)
-results = search_tool.invoke({"query": "your query"})
+results = asyncio.run(search_tool.ainvoke({"query": "your query"}))
 
 # parse page IDs from results, then fetch each page
-fetch_tool = next(t for t in notion_tools if "retrieve" in t.name or "page" in t.name)
-page = fetch_tool.invoke({"page_id": page_id})
+fetch_tool = next(t for t in notion_tools if t.name == "API-retrieve-a-page")
+page = asyncio.run(fetch_tool.ainvoke({"page_id": page_id}))
 ```
 
 ### Human review node
@@ -320,17 +322,28 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from langgraph.types import Command
-from langgraph.errors import GraphInterrupt
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langfuse import get_client
+from langfuse.langchain import CallbackHandler
 from graph import build_graph
+
 
 def load_mcp_tools() -> list:
     with open("mcp_config.json") as f:
         cfg = json.load(f)
-    async def _load():
-        async with MultiServerMCPClient(cfg) as client:
-            return client.get_tools()
-    return asyncio.run(_load())
+    client = MultiServerMCPClient(cfg)
+    return asyncio.run(client.get_tools())
+
+
+def stream_until_pause(graph, payload, thread) -> str | None:
+    """Stream the graph until it ends or pauses. Return the interrupt prompt, or None at the end."""
+    for step in graph.stream(payload, config=thread, stream_mode="updates"):
+        node_name, updates = next(iter(step.items()))
+        if node_name == "__interrupt__":
+            return updates[0].value
+        print(f"  ✓ {node_name} wrote: {list(updates.keys())}")
+    return None
+
 
 def run(your_input: str) -> None:
     mcp_tools = load_mcp_tools()
@@ -339,7 +352,8 @@ def run(your_input: str) -> None:
         "configurable": {
             "thread_id": str(uuid.uuid4()),
             "notion_tools": mcp_tools,   # rename key to match your agent node
-        }
+        },
+        "callbacks": [CallbackHandler()],
     }
 
     initial = {
@@ -350,25 +364,17 @@ def run(your_input: str) -> None:
         "retry_count": 0,
     }
 
-    print(f"\\n{'='*60}\\nRunning pipeline for: {your_input}\\n{'='*60}")
+    print(f"\n{'='*60}\nRunning pipeline for: {your_input}\n{'='*60}")
 
-    try:
-        for step in graph.stream(initial, config=thread, stream_mode="updates"):
-            node_name, updates = next(iter(step.items()))
-            print(f"  ✓ {node_name} wrote: {list(updates.keys())}")
-    except GraphInterrupt as exc:
-        while True:
-            response = input(f"\\n[REVIEW] {exc.args[0]}\\n> ").strip()
-            try:
-                for step in graph.stream(Command(resume=response), config=thread, stream_mode="updates"):
-                    node_name, updates = next(iter(step.items()))
-                    print(f"  ✓ {node_name} wrote: {list(updates.keys())}")
-                break
-            except GraphInterrupt as next_exc:
-                exc = next_exc
+    prompt = stream_until_pause(graph, initial, thread)
+    while prompt is not None:
+        response = input(f"\n[REVIEW] {prompt}\n> ").strip()
+        prompt = stream_until_pause(graph, Command(resume=response), thread)
 
     final = graph.get_state(thread).values
-    print(f"\\n  published = {final.get('published')}")
+    print(f"\n  published = {final.get('published')}")
+    get_client().flush()
+
 
 if __name__ == "__main__":
     run(sys.argv[1] if len(sys.argv) > 1 else "default-input")
@@ -393,7 +399,9 @@ Work through this checklist as you test:
 | Feedback loop | Entering feedback re-runs the generation agent; `retry_count` increments |
 | Approval | Entering "approve" routes to the publish node |
 | Publish | `published = True` printed at the end |
-| LangSmith trace | Open [smith.langchain.com](http://smith.langchain.com/) and confirm the full run is visible |
+| Langfuse trace | Open [cloud.langfuse.com](https://cloud.langfuse.com/), go to **Tracing** and confirm the full run is visible, one trace per `stream()` call |
+
+> 💡 Filter traces by name to `LangGraph`, so the list shows one row per `stream()` call. A trace that ends at the review pause shows as an error: that's the pause, not a failure.
 
 ---
 

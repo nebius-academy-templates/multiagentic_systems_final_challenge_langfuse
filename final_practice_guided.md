@@ -22,7 +22,7 @@ You'll create every file from scratch: credentials, state, agent nodes, the huma
 
 Once you log in to your GitHub account, the repository for this task is added automatically.
 
-1. Confirm that `multiagentic_systems_final_challenge` appears in your GitHub account.
+1. Confirm that `multiagentic_systems_final_challenge_langfuse` appears in your GitHub account.
 2. Clone the repo and open it in your editor.
 3. Make sure you have Python 3.11+ and Node.js 24+ installed.
 

@@ -165,10 +165,13 @@ class YourState(TypedDict):
 
 Decide which MCP server gives your pipeline the external context it needs.
 
-| Server | npm package | Use case |
+| Server | Package or install | Use case |
 | --- | --- | --- |
 | Notion | `@notionhq/notion-mcp-server` | Docs, wikis, project pages |
+| GitHub | `ghcr.io/github/github-mcp-server` (Docker), or the remote `https://api.githubcopilot.com/mcp/` | Issues, PRs, file contents |
 | Filesystem | `@modelcontextprotocol/server-filesystem` | Local files, runbooks |
+| Slack | `slack-mcp-server` (community), or the remote `https://mcp.slack.com/mcp` with a Slack app | Channel history, threads |
+| Brave Search | `@brave/brave-search-mcp-server` | Web search |
 
 ### 5.2 Create `mcp_config.json`
 
@@ -184,6 +187,8 @@ Decide which MCP server gives your pipeline the external context it needs.
   }
 }
 ```
+
+For a Docker image, put `docker` in `command` and the `docker run` arguments in `args`. For a remote server, use `"transport": "streamable_http"` with its `url`, and pass the token in `headers`, for example `{"Authorization": "Bearer <your token>"}`.
 
 > **Think:** which tools does your MCP server expose? Which tool names will your agents call to search and which to fetch full content? (Use `client.get_tools()` in a scratch script to print them out.)
 > 

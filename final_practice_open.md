@@ -102,7 +102,7 @@ Your graph does not have to match this shape — it just needs to be intentional
 
 Once you have your design:
 
-1. Create a new folder for your project.
+1. Create a new folder for your project in your copy of [`multiagentic_systems_final_challenge_langfuse`](https://github.com/nebius-academy-templates/multiagentic_systems_final_challenge_langfuse).
 2. Copy `requirements.txt` as a starting point and add any extra packages your domain needs.
 3. Create a `.env` file with the API keys your pipeline will use, including `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` (from your Langfuse project's **Settings** → **API Keys**) and `LANGFUSE_BASE_URL=https://cloud.langfuse.com` for tracing, and `ANTHROPIC_OPEN_TELEMETRY=false` so each Claude call shows once in the trace.
 
